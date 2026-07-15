@@ -1118,7 +1118,19 @@ def _build_child_agent(
     else:
         parent_toolsets = set(DEFAULT_TOOLSETS)
 
-    if toolsets:
+    # Lightweight leaf workers can be configured without inherited tools.
+    # This is useful for local CPU models used only for summarization,
+    # classification and analysis: tool schemas can otherwise add tens of
+    # thousands of tokens to every delegated request.
+    inherit_tools = delegation_cfg.get("inherit_tools", True)
+    lightweight_leaf = (
+        effective_role == "leaf"
+        and inherit_tools is False
+    )
+
+    if lightweight_leaf:
+        child_toolsets = []
+    elif toolsets:
         # Intersect with parent — subagent must not gain tools the parent lacks.
         # Expand composite toolsets (e.g. hermes-cli) so that individual
         # toolset names (e.g. web, terminal) are recognised during intersection.
@@ -3099,12 +3111,21 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         if configured_api_mode in {"chat_completions", "codex_responses", "anthropic_messages"}:
             api_mode = configured_api_mode
 
+        configured_max_output_tokens = cfg.get("max_output_tokens")
+        if not (
+            isinstance(configured_max_output_tokens, int)
+            and configured_max_output_tokens > 0
+        ):
+            configured_max_output_tokens = None
+
         return {
             "model": configured_model,
             "provider": provider,
             "base_url": configured_base_url,
             "api_key": api_key,
             "api_mode": api_mode,
+            "request_overrides": None,
+            "max_output_tokens": configured_max_output_tokens,
         }
 
     if not configured_provider:
