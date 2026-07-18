@@ -273,6 +273,82 @@ def _merge_custom_provider_extra_body(agent, custom_providers: List[Dict[str, An
     agent.request_overrides = overrides
 
 
+
+def _merge_main_model_request_overrides(agent) -> None:
+    """Apply config.yaml model.request_overrides only to the main model.
+
+    Existing runtime overrides, such as /fast service_tier, take precedence.
+    Auxiliary and delegated models are excluded because their model/base_url
+    do not match the configured main model.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config() or {}
+        model_config = config.get("model") or {}
+
+        configured_model = str(
+            model_config.get("default") or ""
+        ).strip()
+
+        configured_base_url = str(
+            model_config.get("base_url") or ""
+        ).strip().rstrip("/").lower()
+
+        agent_model = str(
+            getattr(agent, "model", "") or ""
+        ).strip()
+
+        agent_base_url = str(
+            getattr(agent, "base_url", "") or ""
+        ).strip().rstrip("/").lower()
+
+        if configured_model and agent_model != configured_model:
+            return
+
+        if (
+            configured_base_url
+            and agent_base_url
+            and agent_base_url != configured_base_url
+        ):
+            return
+
+        static_overrides = model_config.get("request_overrides")
+
+        if not isinstance(static_overrides, dict):
+            return
+
+    except Exception:
+        return
+
+    # Static model defaults first.
+    merged = dict(static_overrides)
+
+    # Runtime overrides such as /fast win over static defaults.
+    existing = dict(
+        getattr(agent, "request_overrides", {}) or {}
+    )
+
+    static_extra = merged.get("extra_body")
+    existing_extra = existing.get("extra_body")
+
+    if isinstance(static_extra, dict) or isinstance(existing_extra, dict):
+        merged_extra = {}
+
+        if isinstance(static_extra, dict):
+            merged_extra.update(static_extra)
+
+        if isinstance(existing_extra, dict):
+            merged_extra.update(existing_extra)
+
+        merged["extra_body"] = merged_extra
+
+    for key, value in existing.items():
+        if key != "extra_body":
+            merged[key] = value
+
+    agent.request_overrides = merged
+
 def init_agent(
     agent,
     base_url: str = None,
@@ -630,6 +706,7 @@ def init_agent(
     agent.reasoning_config = reasoning_config  # None = use default (medium for OpenRouter)
     agent.service_tier = service_tier
     agent.request_overrides = dict(request_overrides or {})
+    _merge_main_model_request_overrides(agent)
     agent.prefill_messages = prefill_messages or []  # Prefilled conversation turns
     agent._force_ascii_payload = False
     
