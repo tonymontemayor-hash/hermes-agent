@@ -34,6 +34,7 @@ class PromptSubmitParams(SessionParams):
     interrupted: bool | None = None  # client-side barge-in: the turn's model message carries the note
     queued: bool | None = None  # client queue drain — the busy path must hold it, never redirect/steer
     surface: str | None = None  # a ClientSurface value; unknown values clear the surface
+    title_preview: str | None = None  # Desktop-composed turn title preview; informational only
     voice_context: str | None = None  # recent spoken transcript, model input only (voice-live)
     truncate_before_user_ordinal: int | None = None
     truncate_before_row_id: int | None = None

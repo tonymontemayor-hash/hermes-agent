@@ -21210,6 +21210,18 @@
             "default": null,
             "title": "Surface"
           },
+          "title_preview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Title Preview"
+          },
           "voice_context": {
             "anyOf": [
               {
