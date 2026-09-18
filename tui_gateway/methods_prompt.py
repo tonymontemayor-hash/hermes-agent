@@ -499,6 +499,42 @@ def _run_after_agent_ready(rid, sid, session, text, display_kind, hosted_termina
                 if session.get("_turn_cancel_requested")
                 else "Session no longer running before the agent was ready")})
             return
+    # Sofia Tony / Qwen 3.8 AUTO reasoning.
+    # Desktop "Minimal" is intentionally repurposed as AUTO.
+    agent = session.get("agent")
+    manual_reasoning = session.get("create_reasoning_override")
+    is_qwen38 = "qwen3.8" in str(getattr(agent, "model", "") or "").lower()
+
+    auto_reasoning_enabled = (
+        manual_reasoning is None
+        or (
+            is_qwen38
+            and isinstance(manual_reasoning, dict)
+            and manual_reasoning.get("enabled", True) is not False
+            and str(manual_reasoning.get("effort") or "").strip().lower() == "minimal"
+        )
+    )
+
+    # Hidden/widget-generated turns must not reclassify the user's reasoning level.
+    if agent is not None and is_qwen38 and auto_reasoning_enabled and display_kind is None:
+        from agent.auto_reasoning import classify_reasoning
+
+        auto_reasoning, auto_reason = classify_reasoning(
+            text,
+            has_images=bool(session.get("attached_images")),
+            profile="private",
+        )
+        agent.reasoning_config = auto_reasoning
+
+        logger.info(
+            "desktop auto reasoning selected: "
+            "session=%s effort=%s enabled=%s reason=%s",
+            session.get("session_key") or sid,
+            auto_reasoning.get("effort", "off"),
+            auto_reasoning.get("enabled", True),
+            auto_reason,
+        )
+
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind,
         terminal_callback=hosted_terminal_callback, turn_author=turn_author)

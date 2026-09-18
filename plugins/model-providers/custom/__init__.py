@@ -44,13 +44,35 @@ class CustomProfile(ProviderProfile):
         # think=True (Ollama-only flag).
         if reasoning_config and isinstance(reasoning_config, dict):
             effort = (reasoning_config.get("effort") or "").strip().lower()
-            if effort == "none" or reasoning_config.get("enabled", True) is False:
+            enabled = reasoning_config.get("enabled", True)
+
+            # Restrict Sofia-specific sampling to the Qwen 3.8 endpoint/model.
+            _base_url = str(ctx.get("base_url") or "").lower()
+            _model = str(ctx.get("model") or ctx.get("model_name") or "").lower()
+            _is_sofia_qwen38 = "qwen3.8" in _model or ":30001" in _base_url
+
+            if effort == "none" or enabled is False:
                 # See #14820.
                 top_level["reasoning_effort"] = "none"
                 if _looks_like_ollama_endpoint(ctx.get("base_url")):
                     extra_body["think"] = False
+
+                if _is_sofia_qwen38:
+                    # Qwen 3.8 recommended non-thinking sampling.
+                    top_level["temperature"] = 0.7
+                    top_level["top_p"] = 0.80
+                    top_level["presence_penalty"] = 1.5
+
             elif effort:
-                top_level["reasoning_effort"] = clamp_effort(effort, OPENAI_COMPAT_WIRE_EFFORTS)
+                top_level["reasoning_effort"] = clamp_effort(
+                    effort, OPENAI_COMPAT_WIRE_EFFORTS
+                )
+
+                if _is_sofia_qwen38:
+                    # Qwen 3.8 recommended thinking sampling.
+                    top_level["temperature"] = 1.0
+                    top_level["top_p"] = 0.95
+                    top_level["presence_penalty"] = 0.0
         return extra_body, top_level
 
     def fetch_models(

@@ -1788,6 +1788,52 @@ class TurnRunner:
             return {"final_response": f"⚠️ Provider authentication failed: {exc}", "messages": [], "api_calls": 0, "tools": []}
         pr = runner._provider_routing
         reasoning_config = runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model)
+
+        # Sofia Tony / Qwen 3.8: automatic per-turn reasoning.
+        # Any explicit /reasoning session override always wins.
+        _reasoning_state = (
+            runner._peek_session_state(ctx.session_key)
+            if ctx.session_key
+            else None
+        )
+        _has_manual_reasoning_override = (
+            _reasoning_state is not None
+            and _reasoning_state.conversation.reasoning_override is not None
+        )
+
+        if (
+            not _has_manual_reasoning_override
+            and "qwen3.8" in str(model or "").lower()
+        ):
+            from agent.auto_reasoning import classify_reasoning
+
+            reasoning_config, _auto_reason = classify_reasoning(
+                str(ctx.message or ""),
+                has_images=bool(getattr(ctx, "media_urls", None)),
+                profile="private",
+            )
+
+            # Sofia: Telegram AUTO reasoning is capped at MEDIUM.
+            # Manual /reasoning overrides are handled above and are not modified.
+            if (
+                platform_key == "telegram"
+                and str(reasoning_config.get("effort", "")).lower() == "xhigh"
+            ):
+                reasoning_config = dict(reasoning_config)
+                reasoning_config["effort"] = "medium"
+                reasoning_config["enabled"] = True
+                _auto_reason = f"{_auto_reason}; telegram_cap=xhigh->medium"
+
+            logger.info(
+                "gateway auto reasoning selected: "
+                "platform=%s session=%s effort=%s enabled=%s reason=%s",
+                platform_key,
+                ctx.session_key or "",
+                reasoning_config.get("effort", "off"),
+                reasoning_config.get("enabled", True),
+                _auto_reason,
+            )
+
         runner._reasoning_config = reasoning_config
         runner._service_tier = runner._resolve_session_service_tier(source=ctx.source, session_key=ctx.session_key)
         stream_consumer, stream_delta_cb, interim_cb, want_interim = self._setup_stream_consumer(platform_key)

@@ -82,7 +82,7 @@ _DEFAULT_MAX_SUBAGENTS_PER_TURN = 50
 
 # Interactive surfaces plus bounded supervised task loops (subagent stopped by its parent;
 # api_server has a live client) doing real edit -> re-run work keep the warn-only default.
-_ATTENDED_PLATFORMS = frozenset({"cli", "tui", "desktop", "acp", "subagent", "api_server"})
+_ATTENDED_PLATFORMS = frozenset({"cli", "tui", "desktop", "acp", "subagent", "api_server", "telegram"})
 
 
 def is_stall_guard_repeatable(tool_name: str) -> bool:
