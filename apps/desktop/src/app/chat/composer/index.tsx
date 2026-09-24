@@ -66,7 +66,7 @@ import { useEmojiCompletions } from './hooks/use-emoji-completions'
 import { useComposerMicroActions } from './hooks/use-micro-actions'
 import { useSlashCompletions } from './hooks/use-slash-completions'
 import { useSessionStatusPresence } from './hooks/use-status-presence'
-import { shouldConvertPasteToAttachment } from './large-paste'
+import { isGoalInlinePaste, shouldConvertPasteToAttachment } from './large-paste'
 import { ActionBadges } from './micro-actions'
 import { chipTypedPathOnSpace, pathifyRefs } from './path-refs'
 import { QueuePanel } from './queue-panel'
@@ -594,7 +594,19 @@ export function ChatBar({
     // material rides along as a file. Falls back to inline insertion if the
     // attachment can't be created (missing bridge, write failure) so the
     // paste is never lost.
-    if (onAttachPastedText && shouldConvertPasteToAttachment(pastedText)) {
+    //
+    // EXCEPTION — `/goal`: the goal text IS the payload and must reach
+    // prompt.submit inline in full; a `.txt` ref would detach the argument
+    // from the command. `composerPlainText(editor)` serializes the editor
+    // BEFORE this paste lands; `isGoalInlinePaste` (see large-paste.ts)
+    // covers both workflows — `/goal ` already typed then a big body pasted,
+    // and the whole `/goal <body>` block pasted into an empty composer.
+    // Replacing a selection in a non-empty composer is deliberately NOT exempt.
+    if (
+      onAttachPastedText &&
+      shouldConvertPasteToAttachment(pastedText) &&
+      !isGoalInlinePaste(composerPlainText(event.currentTarget), pastedText)
+    ) {
       const editor = event.currentTarget
 
       void Promise.resolve(onAttachPastedText(pastedText)).then(attached => {
