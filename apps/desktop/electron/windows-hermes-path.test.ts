@@ -88,6 +88,8 @@ test('chooseUpdaterArgs: passes the branch through unchanged in both modes', () 
 // `main`. With no --branch, `hermes update` infers the branch from the checkout
 // (attached tracked branch) or fails safe on a detached/unresolvable HEAD — a
 // silent `--branch main` is exactly how a custom install got re-targeted to main.
+// DESKTOP-UPDATER-E2E-MARKER (2026-09-24): comment-only marker to change the
+// apps/desktop content-hash for a real Windows updater E2E; no runtime effect.
 test('chooseUpdaterArgs: blank/unknown branch emits NO --branch flag (never a silent main)', () => {
   const signals = { hasBootstrapMarker: true, hasVenvHermes: true, hasVenvPython: true }
   assert.deepEqual(chooseUpdaterArgs(signals, ''), ['--update'])
