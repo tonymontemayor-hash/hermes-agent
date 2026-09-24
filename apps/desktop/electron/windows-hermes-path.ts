@@ -66,8 +66,13 @@ export function buildPathExtCandidates(pathext: string | undefined, isWindows: b
  * A bootstrap-complete marker proves install provenance, not current runtime
  * usability, and may remain after the venv is removed or quarantined.
  *
+ * `--branch` is appended ONLY when a real branch value is known. An empty/
+ * undefined branch must NOT synthesize `main`: `hermes update` without
+ * `--branch` infers the branch from the checkout (attached tracked branch) or
+ * fails safe on a detached/unresolvable HEAD — never a silent main switch.
+ *
  * @param {BootstrapRecoverySignals} signals
- * @param {string} branch
+ * @param {string} [branch] resolved branch, '' when unknown (no flag emitted).
  * @returns {string[]} updater argv, e.g. ['--update', '--branch', 'main'].
  */
 export interface BootstrapRecoverySignals {
@@ -76,10 +81,18 @@ export interface BootstrapRecoverySignals {
   hasVenvPython: boolean
 }
 
-export function chooseUpdaterArgs(signals: BootstrapRecoverySignals, branch: string): string[] {
+export function chooseUpdaterArgs(
+  signals: BootstrapRecoverySignals,
+  branch?: string | null
+): string[] {
   const canRunUpdater = signals.hasVenvHermes && signals.hasVenvPython
+  const args = canRunUpdater ? ['--update'] : ['--repair']
 
-  return canRunUpdater ? ['--update', '--branch', branch] : ['--repair', '--branch', branch]
+  if (branch && branch.trim()) {
+    args.push('--branch', branch.trim())
+  }
+
+  return args
 }
 
 /**

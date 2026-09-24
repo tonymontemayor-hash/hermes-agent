@@ -152,6 +152,8 @@ def test_update_fails_loudly_when_head_pinned(monkeypatch, tmp_path, capsys):
 
     assert exc_info.value.code == 1
     out = capsys.readouterr().out
-    assert "Code did not move" in out
+    # A detached HEAD with no --branch now fails safe (Caso C): it must NOT assume main and
+    # must NOT print "checkout main". It reports the detached state + the actionable fix.
+    assert "HEAD is detached and no branch was specified" in out
     assert "✓ Code updated!" not in out
-    assert "checkout main" in out
+    assert "checkout main" not in out

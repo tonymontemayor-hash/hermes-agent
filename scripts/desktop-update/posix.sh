@@ -36,7 +36,7 @@
 set -u
 
 ORIGINAL_ARGS=("$@")
-INSTALL_ROOT="" BRANCH="main" DESKTOP_PID=0 RELAUNCH_TARGET=""
+INSTALL_ROOT="" BRANCH="" DESKTOP_PID=0 RELAUNCH_TARGET=""
 RELAUNCH_CWD="" SANDBOX_FALLBACK=0 RELAUNCH_ARGS=()
 NO_UI=0 NO_MARKER_CLEANUP=0 SELF_TEST_UI=0 SELF_TEST_GATE=0 SELF_TEST_MARKER=0
 SELF_TEST_TCC_HEAL=0
@@ -771,9 +771,16 @@ if "${UPDATE_INVOKE[@]}" update --help 2>/dev/null | grep -q -- '--keep-stash'; 
 else
   log "installed hermes predates --keep-stash; running without it"
 fi
-log "running: ${UPDATE_INVOKE[*]} update --yes --gateway $KEEP_STASH --branch $BRANCH"
+# --branch is emitted ONLY when a real branch value is known. An empty value must
+# NOT synthesize `main`: with no flag, `hermes update` infers the branch from the
+# checkout (attached tracked branch) or fails safe on a detached/unresolvable HEAD.
+BRANCH_ARGS=()
+if [ -n "$BRANCH" ]; then
+  BRANCH_ARGS=(--branch "$BRANCH")
+fi
+log "running: ${UPDATE_INVOKE[*]} update --yes --gateway $KEEP_STASH ${BRANCH_ARGS[*]}"
 publish_stage "Updating code and dependencies"
-OUT="$("${UPDATE_INVOKE[@]}" update --yes --gateway $KEEP_STASH --branch "$BRANCH" 2>&1)"; CODE=$?
+OUT="$("${UPDATE_INVOKE[@]}" update --yes --gateway $KEEP_STASH ${BRANCH_ARGS[@]+"${BRANCH_ARGS[@]}"} 2>&1)"; CODE=$?
 printf '%s\n' "$OUT" >> "$LOG" 2>/dev/null
 log "hermes update exit code: $CODE"
 
@@ -795,7 +802,7 @@ if [ "$CODE" -ne 0 ] && [ "$CODE" -ne 2 ]; then
   fi
   log "retrying once (freshly pulled fix loads on the second run)"
   publish_stage "Retrying update"
-  OUT="$("${UPDATE_INVOKE[@]}" update --yes --gateway $KEEP_STASH --branch "$BRANCH" 2>&1)"; CODE=$?
+  OUT="$("${UPDATE_INVOKE[@]}" update --yes --gateway $KEEP_STASH ${BRANCH_ARGS[@]+"${BRANCH_ARGS[@]}"} 2>&1)"; CODE=$?
   printf '%s\n' "$OUT" >> "$LOG" 2>/dev/null
   log "retry exit code: $CODE"
 fi

@@ -325,9 +325,14 @@ async fn run_update(app: AppHandle) -> Result<()> {
         }
     };
 
+    // Branch to update against. EMPTY (no --branch) when neither the CLI arg nor
+    // BUILD_PIN_BRANCH provides one — we must NOT synthesize `main`. With no
+    // --branch, `hermes update` infers the branch from the checkout (attached
+    // tracked branch) or fails safe on a detached/unresolvable HEAD; the desktop
+    // passes the exact branch it detected the update against when known.
     let update_branch = update_branch_from_args(std::env::args().skip(1))
         .or_else(|| option_env_string("BUILD_PIN_BRANCH"))
-        .unwrap_or_else(|| "main".to_string());
+        .unwrap_or_default();
     let target_app = if cfg!(target_os = "macos") {
         target_app_from_args(std::env::args().skip(1))
     } else {
@@ -379,19 +384,22 @@ async fn run_update(app: AppHandle) -> Result<()> {
     );
 
     // ---- stage 2: hermes update -----------------------------------------
-    // Pass --branch so `hermes update` targets the branch this installer was
-    // built/pinned against (BUILD_PIN_BRANCH), NOT its built-in default of
-    // `main`. The install was a detached-HEAD checkout of a specific commit;
-    // without --branch, `hermes update` switches the checkout to `main` (a
-    // divergent branch that may not even have the desktop CLI command), then
-    // reports "already up to date" against the wrong branch. The desktop
-    // detected the update against this same branch, so we must update against
-    // it too.
+    // Pass --branch ONLY when a real branch is known (the CLI arg the desktop
+    // supplied, or the BUILD_PIN_BRANCH the installer was built/pinned against).
+    // We deliberately do NOT synthesize `main`: the install is a detached-HEAD
+    // checkout of a specific commit, and with no --branch `hermes update` now
+    // infers the attached branch or fails safe with an actionable message —
+    // a silent `main` switch is exactly what stranded custom installs. The
+    // desktop detected the update against a specific branch and passes it.
     emit_log(
         &app,
         Some("update"),
         LogStream::Stdout,
-        &format!("[update] updating against branch {update_branch}"),
+        if update_branch.is_empty() {
+            "[update] updating (branch inferred from checkout)".into()
+        } else {
+            format!("[update] updating against branch {update_branch}")
+        },
     );
     let child_env = update_child_env(&install_root);
     let mut update_args: Vec<String> =
@@ -411,8 +419,14 @@ async fn run_update(app: AppHandle) -> Result<()> {
     // install half-updated. If that guard fires, it exits 2 and the match arm
     // below surfaces the correct "close all Hermes windows" message.
     update_args.push("--force".into());
-    update_args.push("--branch".into());
-    update_args.push(update_branch);
+    // --branch is appended ONLY when a real branch is known. An empty value must
+    // NOT synthesize `main`: with no flag, `hermes update` infers the branch
+    // from the checkout (attached tracked branch) or fails safe on a
+    // detached/unresolvable HEAD — never a silent main switch.
+    if !update_branch.is_empty() {
+        update_args.push("--branch".into());
+        update_args.push(update_branch);
+    }
 
     emit_stage(&app, "update", StageState::Running, None, None);
     let started = Instant::now();

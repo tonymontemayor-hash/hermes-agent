@@ -84,6 +84,28 @@ test('chooseUpdaterArgs: passes the branch through unchanged in both modes', () 
   )
 })
 
+// NO_MAIN_FALLBACK: an empty/whitespace/undefined branch must NOT synthesize
+// `main`. With no --branch, `hermes update` infers the branch from the checkout
+// (attached tracked branch) or fails safe on a detached/unresolvable HEAD — a
+// silent `--branch main` is exactly how a custom install got re-targeted to main.
+test('chooseUpdaterArgs: blank/unknown branch emits NO --branch flag (never a silent main)', () => {
+  const signals = { hasBootstrapMarker: true, hasVenvHermes: true, hasVenvPython: true }
+  assert.deepEqual(chooseUpdaterArgs(signals, ''), ['--update'])
+  assert.deepEqual(chooseUpdaterArgs(signals, '   '), ['--update'])
+  assert.deepEqual(chooseUpdaterArgs(signals, undefined), ['--update'])
+  assert.deepEqual(chooseUpdaterArgs(signals, null), ['--update'])
+  // Same rule in repair mode.
+  const repairSignals = { hasBootstrapMarker: true, hasVenvHermes: false, hasVenvPython: false }
+  assert.deepEqual(chooseUpdaterArgs(repairSignals, ''), ['--repair'])
+  // An explicit branch is still passed through (only blank is dropped).
+  assert.deepEqual(chooseUpdaterArgs(signals, 'sofia-v2026.9.14-custom'), [
+    '--update',
+    '--branch',
+    'sofia-v2026.9.14-custom'
+  ])
+})
+
+
 function makeDeps(overrides: Partial<Parameters<typeof resolveVenvHermesCommand>[2]> = {}) {
   return {
     isWindows: true,

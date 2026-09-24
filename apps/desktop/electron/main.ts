@@ -3169,33 +3169,40 @@ function emitUpdateProgress(payload) {
   }
 }
 
-// Self-heal the tracked update branch: if origin no longer publishes it (e.g.
-// bb/gui was merged into main and deleted), fall back to main and persist so
-// every later check/apply follows main — no manual flip, even for already-
-// installed clients. Read-only ls-remote probe; only flips on a definitive
-// "ref absent" (exit 2), never on a transient network error, so a flaky
-// connection can't strand a user on the wrong branch.
+// Ref-existence probe for the branch an update targets. A merged-away custom
+// branch (e.g. bb/gui folded into main and deleted) reads as a definitive
+// "ref absent" (exit 2); a transient network error must NOT be mistaken for
+// that, so only exit 2 is treated as gone.
+//
+// NO_MAIN_FALLBACK_FOR_CUSTOM: a configured/current custom branch that is gone
+// from its remote is NOT silently re-targeted to main — neither here nor in
+// the on-disk config (rewriting updates.json to 'main' would flip a custom
+// install to main on every later check/apply). The branch is returned
+// unchanged and the update then fails safe in `hermes update` with an
+// actionable message; only a blank/missing branch resolves to the main
+// default (first-install / bootstrap semantics).
 async function resolveHealedBranch(updateRoot, branch) {
-  if (!branch || branch === 'main') {
-    return branch || 'main'
+  const name = (branch || '').trim()
+
+  if (!name || name === 'main') {
+    return name || 'main'
   }
 
   const originUrl = await getOriginUrl(updateRoot)
   const remote = isOfficialSshRemote(originUrl) ? OFFICIAL_REPO_HTTPS_URL : 'origin'
-  const probe = await runGit(['ls-remote', '--exit-code', '--heads', remote, branch], { cwd: updateRoot })
+  const probe = await runGit(['ls-remote', '--exit-code', '--heads', remote, name], { cwd: updateRoot })
 
   if (probe.code !== 2) {
-    return branch
+    return name
   }
 
-  rememberLog(`[updates] origin/${branch} is gone (merged?); falling back to main`)
-  const config = readDesktopUpdateConfig()
+  // Ref definitively absent: do NOT heal to main and do NOT rewrite the config.
+  // Keep the branch so the update targets it explicitly and fails safe with a
+  // message naming the exact missing ref — the user decides (re-point the
+  // branch, or run `hermes update --branch <other>` explicitly).
+  rememberLog(`[updates] origin/${name} is absent on the remote; keeping it (no silent main fallback)`)
 
-  if (config.branch !== 'main') {
-    writeDesktopUpdateConfig({ ...config, branch: 'main' })
-  }
-
-  return 'main'
+  return name
 }
 
 // Passive checks never touch git's network side. Every client used to `git
@@ -3235,6 +3242,17 @@ async function checkUpdates({ force = false }: { force?: boolean } = {}) {
 
   if (!force && cacheIsFresh(cached, { branch, currentSha, now })) {
     return { ...cached.status, dirty: dirtyStr.length > 0, currentBranch }
+  }
+
+  // Git is the source of truth for the branch the distance-to-tip is measured
+  // against: the branch the checkout is attached to. A custom install must not
+  // be measured against the configured/default `main` (it would read "N behind
+  // main" while tracking a fork's custom branch). Detached HEAD has no attached
+  // branch, so the configured/default value stands in that case.
+  const attached = currentBranch && currentBranch !== 'HEAD' ? currentBranch : ''
+
+  if (attached) {
+    branch = attached
   }
 
   branch = await resolveHealedBranch(updateRoot, branch)
@@ -4104,8 +4122,42 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
 
     const updateRoot = resolveUpdateRoot()
     const { branch: configuredBranch } = readDesktopUpdateConfig()
-    const branch = await resolveHealedBranch(updateRoot, configuredBranch || DEFAULT_UPDATE_BRANCH)
-    const updaterArgs = ['--update', '--branch', branch]
+    // Git is the source of truth for the branch the update targets: when the
+    // checkout is attached to a branch, stay on it. A stale configured branch or
+    // the DEFAULT main must NOT silently re-target a custom install to main —
+    // that is exactly how an install running `sofia-v2026.9.14-custom` ended up
+    // pulled/synced against main and left detached. A detached HEAD has no
+    // attached branch: leave updateBranch EMPTY so NO --branch flag is emitted
+    // and `hermes update` fails safe (it must not be handed `--branch main` and
+    // switch the checkout to main). The configured/default value is the last
+    // resort only when HEAD cannot be read at all (not a git checkout).
+    let updateBranch = configuredBranch || DEFAULT_UPDATE_BRANCH
+
+    try {
+      const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: updateRoot })
+      const current = (head.stdout || '').trim()
+
+      if (head.code === 0 && current && current !== 'HEAD') {
+        updateBranch = current
+      } else if (head.code === 0) {
+        // HEAD is detached: no unambiguous attached branch -> no --branch flag.
+        updateBranch = ''
+      }
+    } catch {
+      // best effort — keep the configured/default branch
+    }
+
+    // resolveHealedBranch only probes a branch that actually exists to check;
+    // a BLANK branch (detached HEAD) must stay blank — it is NOT an opportunity
+    // to synthesize main. Guarding here keeps the flag off for detached checkouts.
+    const branch = updateBranch && updateBranch.trim()
+      ? await resolveHealedBranch(updateRoot, updateBranch)
+      : ''
+    const updaterArgs = ['--update']
+
+    if (branch && branch.trim()) {
+      updaterArgs.push('--branch', branch.trim())
+    }
     const targetApp = IS_MAC ? runningAppBundle() : null
 
     if (targetApp) {
@@ -4400,9 +4452,35 @@ async function handOffWindowsBootstrapRecovery(reason) {
   const updateRoot = resolveUpdateRoot()
   const { branch: configuredBranch } = readDesktopUpdateConfig()
 
-  const branch = directoryExists(path.join(updateRoot, '.git'))
-    ? await resolveHealedBranch(updateRoot, configuredBranch || DEFAULT_UPDATE_BRANCH)
-    : configuredBranch || DEFAULT_UPDATE_BRANCH
+  // Git is the source of truth (same rule as applyUpdates): the update targets
+  // the branch the checkout is actually attached to. A stale configured branch
+  // or the DEFAULT main must not re-target a custom install to main. A detached
+  // HEAD has no attached branch -> '' -> NO --branch flag, so `hermes update`
+  // infers from the checkout or fails safe instead of being told `--branch main`.
+  let updateBranch = ''
+
+  if (directoryExists(path.join(updateRoot, '.git'))) {
+    updateBranch = configuredBranch || DEFAULT_UPDATE_BRANCH
+
+    try {
+      const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: updateRoot })
+      const current = (head.stdout || '').trim()
+
+      if (head.code === 0 && current && current !== 'HEAD') {
+        updateBranch = current
+      } else if (head.code === 0) {
+        updateBranch = ''
+      }
+    } catch {
+      // best effort — keep the configured/default branch
+    }
+
+    // Probe only a non-blank branch: a detached HEAD must NOT be re-synthesized
+    // to main here (resolveHealedBranch would return 'main' for a blank input).
+    updateBranch = updateBranch && updateBranch.trim()
+      ? await resolveHealedBranch(updateRoot, updateBranch)
+      : ''
+  }
 
   const venvBin = path.join(updateRoot, 'venv', IS_WINDOWS ? 'Scripts' : 'bin')
   const venvHermes = path.join(venvBin, IS_WINDOWS ? 'hermes.exe' : 'hermes')
@@ -4420,7 +4498,7 @@ async function handOffWindowsBootstrapRecovery(reason) {
       hasVenvHermes: fileExists(venvHermes),
       hasVenvPython: fileExists(venvPython)
     },
-    branch
+    updateBranch
   )
 
   await releaseBackendLockForUpdate(updateRoot)
@@ -4613,8 +4691,14 @@ async function applyUpdatesPosixHandoff(opts: any) {
   // ── Pre-flight state.db integrity guard (#68474) ──
   preflightStateDb(HERMES_HOME, rememberLog)
 
-  // Branch-pin so a non-main checkout doesn't get switched to main (and
-  // self-heal to main when the pinned branch no longer exists on origin).
+  // Branch-pin so a non-main checkout doesn't get switched to main. Git is the
+  // source of truth (same rule as the Windows path): when the checkout is
+  // attached to a branch, stay on it; when the pinned branch is gone from its
+  // remote, resolveHealedBranch keeps it (NO_MAIN_FALLBACK_FOR_CUSTOM) and the
+  // update fails safe downstream. A detached HEAD has no attached branch -> ''
+  // -> NO --branch flag, so `hermes update` infers from the checkout or fails
+  // safe instead of being told `--branch main`. Only when HEAD cannot be read at
+  // all (not a git checkout) does the DEFAULT main stand in.
   let branch = 'main'
 
   try {
@@ -4623,12 +4707,16 @@ async function applyUpdatesPosixHandoff(opts: any) {
 
     if (head.code === 0 && current && current !== 'HEAD') {
       branch = await resolveHealedBranch(updateRoot, current)
+    } else if (head.code === 0) {
+      // HEAD is detached: no unambiguous attached branch -> no --branch flag.
+      branch = ''
     }
   } catch {
-    // best effort
+    // best effort — keep the default branch
   }
 
-  const args = [...handoff.args, '--install-root', updateRoot, '--branch', branch, '--desktop-pid', String(process.pid)]
+  const branchArgs = branch && branch.trim() ? ['--branch', branch.trim()] : []
+  const args = [...handoff.args, '--install-root', updateRoot, ...branchArgs, '--desktop-pid', String(process.pid)]
   const updateStartedAt = Math.floor(Date.now() / 1000)
 
   // Relaunch target: the running .app bundle on mac (script swaps the

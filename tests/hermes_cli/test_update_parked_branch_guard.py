@@ -282,7 +282,9 @@ def test_update_skips_and_warns_on_dirty_parked_branch(
     with the branch named in the summary."""
     (repo_pair / "a.txt").write_text("local edit\n")
     _patch_update_flow(monkeypatch, repo_pair)
-    args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
+    # --branch main explicit (Caso B): the parked-branch flow targets main; the legacy
+    # branch=None fallback no longer resolves (STRICT Caso D: old-feature has no upstream).
+    args = SimpleNamespace(branch="main", yes=False, force=False, force_venv=False)
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main.cmd_update(args)
@@ -324,7 +326,9 @@ def test_update_switches_unmerged_parked_branch_with_kept_notice(
         "_abort_dependency_sync_if_self_locked",
         lambda *a, **k: (_ for _ in ()).throw(_StopFlow()),
     )
-    args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
+    # --branch main explicit (Caso B): old-feature is parked with no upstream, so the
+    # legacy branch=None fallback no longer resolves (STRICT Caso D).
+    args = SimpleNamespace(branch="main", yes=False, force=False, force_venv=False)
 
     with pytest.raises(_StopFlow):
         hermes_main.cmd_update(args)
@@ -378,7 +382,9 @@ def test_update_updates_unmerged_branch_in_place_when_configured(
         "_abort_dependency_sync_if_self_locked",
         lambda *a, **k: (_ for _ in ()).throw(_StopFlow()),
     )
-    args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
+    # --branch main explicit (Caso B): old-feature is parked with no upstream, so the
+    # legacy branch=None fallback no longer resolves (STRICT Caso D).
+    args = SimpleNamespace(branch="main", yes=False, force=False, force_venv=False)
 
     with pytest.raises(_StopFlow):
         hermes_main.cmd_update(args)
@@ -433,8 +439,9 @@ def test_switch_branch_flag_overrides_in_place_strategy(
         "_abort_dependency_sync_if_self_locked",
         lambda *a, **k: (_ for _ in ()).throw(_StopFlow()),
     )
+    # --branch main explicit (Caso B) so the switch target is unambiguous (STRICT Caso D).
     args = SimpleNamespace(
-        branch=None, yes=False, force=False, force_venv=False,
+        branch="main", yes=False, force=False, force_venv=False,
         switch_branch=True,
     )
 
@@ -483,8 +490,10 @@ def test_unmerged_branch_still_updates_in_place_without_the_flag(
         "_abort_dependency_sync_if_self_locked",
         lambda *a, **k: (_ for _ in ()).throw(_StopFlow()),
     )
+    # --branch main explicit (Caso B): old-feature is parked with no upstream, so the
+    # legacy branch=None fallback no longer resolves (STRICT Caso D).
     args = SimpleNamespace(
-        branch=None, yes=False, force=False, force_venv=False,
+        branch="main", yes=False, force=False, force_venv=False,
         switch_branch=False,
     )
 
@@ -517,7 +526,9 @@ def test_update_auto_switches_clean_merged_parked_branch(
         "_abort_dependency_sync_if_self_locked",
         lambda *a, **k: (_ for _ in ()).throw(_StopFlow()),
     )
-    args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
+    # --branch main explicit (Caso B): old-feature is parked with no upstream, so the
+    # legacy branch=None fallback no longer resolves (STRICT Caso D).
+    args = SimpleNamespace(branch="main", yes=False, force=False, force_venv=False)
 
     with pytest.raises(_StopFlow):
         hermes_main.cmd_update(args)
@@ -573,7 +584,9 @@ def test_update_up_to_date_path_does_not_repark_merged_branch(
         "update_managed_uv",
         lambda *a, **k: (_ for _ in ()).throw(_StopFlow()),
     )
-    args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
+    # --branch main explicit (Caso B): the checkout is parked on old-feature (no upstream),
+    # so the legacy branch=None fallback no longer resolves (STRICT Caso D).
+    args = SimpleNamespace(branch="main", yes=False, force=False, force_venv=False)
 
     with pytest.raises(_StopFlow):
         hermes_main.cmd_update(args)

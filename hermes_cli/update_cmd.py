@@ -710,29 +710,44 @@ def _repair_current_checkout(
     return current_checkout_complete
 
 
-def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha) -> None:
-    """Fast-forward failed: merge on a custom branch (local commits survive) or reset --hard on the
-    same branch (rescue ref first when histories share no ancestor). ``sys.exit(1)`` on failure."""
-    # A custom branch (local commits atop origin/<branch>) also can't ff, and reset --hard
-    # would discard that work: merge instead, stop on conflict.
+def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, source_ref: str) -> None:
+    """Fast-forward failed: on a tracked custom branch fail safe (FF-only, no reset); on an
+    untracked branch merge so local commits survive, or reset --hard (rescue ref first when
+    histories share no ancestor). ``sys.exit(1)`` on failure or on a tracked-branch divergence."""
     _cur_branch = (_git_run(git_cmd, ["branch", "--show-current"]).stdout or "").strip()
+    # Same tracked custom branch + divergence: FF-only by contract (Caso A / §4) — a
+    # divergence means local commits are NOT an ancestor of the remote tip, so auto-reset
+    # would discard real work. Fail safe with an actionable message instead of a destructive
+    # reset. ``main`` keeps its historical divergence behavior (Caso B: preserve the standard
+    # updater contract — a force-pushed main is still reset after the local autostash).
+    if _cur_branch == branch and branch != "main" and _current_upstream_ref(git_cmd):
+        print()
+        print(f"✗ Update stopped: '{branch}' has diverged from its tracking ref {source_ref}.")
+        print("  Fast-forward is not possible (your local commits are not an ancestor of the remote tip).")
+        print("  No merge commit, rebase, or reset was performed; your commits are untouched.")
+        print("  Reconcile manually, then re-run the update:")
+        print(f"    git -C {_m().PROJECT_ROOT} rebase {source_ref}      # or merge, per your workflow")
+        print(f"    hermes update")
+        sys.exit(1)
+    # A custom branch (local commits atop the remote) also can't ff, and reset --hard
+    # would discard that work: merge instead, stop on conflict.
     if _cur_branch and _cur_branch != branch:
         print(
             f"  ⚠ Checkout is on custom branch '{_cur_branch}' — "
-            f"merging origin/{branch} instead of resetting so local commits survive...")
+            f"merging {source_ref} instead of resetting so local commits survive...")
         # Best-effort safety tag as a recovery anchor.
         _git_run(git_cmd, ["tag", f"pre-update-{_time.strftime('%Y%m%d-%H%M%S')}"])
-        if _git_run(git_cmd, ["merge", "--no-edit", f"origin/{branch}"]).returncode != 0:
+        if _git_run(git_cmd, ["merge", "--no-edit", source_ref]).returncode != 0:
             _git_run(git_cmd, ["merge", "--abort"])
             print("✗ Merge conflict between local commits and upstream — update stopped, nothing was changed.")
-            print(f"  Resolve manually: cd {_m().PROJECT_ROOT} && git merge origin/{branch}")
+            print(f"  Resolve manually: cd {_m().PROJECT_ROOT} && git merge {source_ref}")
             print("  Then re-run the update. Local work is untouched.")
             sys.exit(1)
         return
-    # Same branch: a true upstream force-push/rebase; local changes are stashed, so reset.
-    # Orphan divergence (no common ancestor: corrupted HEAD, re-init) would lose the whole
-    # local graph, so park pre_pull_sha behind a rescue ref first.
-    merge_base_result = _git_run(git_cmd, ["merge-base", "HEAD", f"origin/{branch}"])
+    # Same branch, untracked (or orphan history): a true upstream force-push/rebase; local
+    # changes are stashed, so reset. Orphan divergence (no common ancestor: corrupted HEAD,
+    # re-init) would lose the whole local graph, so park pre_pull_sha behind a rescue ref first.
+    merge_base_result = _git_run(git_cmd, ["merge-base", "HEAD", source_ref])
     has_common_ancestor = merge_base_result.returncode == 0 and merge_base_result.stdout.strip()
     if not has_common_ancestor and pre_pull_sha:
         from datetime import datetime as _dt, timezone
@@ -740,7 +755,7 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha) -> None:
         rescue_ref = (
             f"refs/hermes-update-backups/orphan-{branch}-"
             f"{_dt.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{pre_pull_sha[:12]}")
-        head = f"  ⚠ Local history shares no common ancestor with origin/{branch} (orphan divergence) — "
+        head = f"  ⚠ Local history shares no common ancestor with {source_ref} (orphan divergence) — "
         if _git_run(git_cmd, ["update-ref", rescue_ref, pre_pull_sha]).returncode == 0:
             print(
                 f"{head}backed up current HEAD to {rescue_ref} before resetting. "
@@ -751,13 +766,14 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha) -> None:
                 f"{head}attempted to back up current HEAD to {rescue_ref} before resetting, "
                 f"but the backup write failed (pre-reset SHA was {pre_pull_sha}).")
         _prune_orphan_rescue_refs(git_cmd, _m().PROJECT_ROOT, branch)
-    print("  ⚠ Fast-forward not possible (history diverged), resetting to match remote...")
-    reset_result = _git_run(git_cmd, ["reset", "--hard", f"origin/{branch}"])
+    print(f"  ⚠ Fast-forward not possible (history diverged), resetting to match {source_ref}...")
+    reset_result = _git_run(git_cmd, ["reset", "--hard", source_ref])
     if reset_result.returncode != 0:
-        print(f"✗ Failed to reset to origin/{branch}.")
+        print(f"✗ Failed to reset to {source_ref}.")
         if reset_result.stderr.strip():
-            print(f"  {reset_result.stderr.strip()}")
-        print(f"  Try manually: git fetch origin && git reset --hard origin/{branch}")
+            print(f"  {reset_result.stderr.strip().splitlines()[0]}")
+        source_remote = source_ref.split("/", 1)[0] if "/" in source_ref else "origin"
+        print(f"  Try manually: git fetch {source_remote} && git reset --hard {source_ref}")
         sys.exit(1)
 
 
@@ -793,10 +809,11 @@ def _rollback_if_pulled_syntax_error(git_cmd, pre_pull_sha) -> None:
 
 def _pull_updates(
     git_cmd, branch, auto_stash_ref, *, prompt_for_restore, gw_input_fn, discard_local_changes,
-    keep_stash):
-    """Fast-forward onto ``origin/<branch>`` and settle the autostash. Divergence by shape:
-    custom branch -> merge, same branch -> reset, orphan history -> rescue ref first; a
-    post-pull syntax error in a critical file rolls back. Exits on failure; returns pre-pull SHA."""
+    keep_stash, source_ref):
+    """Fast-forward onto ``source_ref`` and settle the autostash. Divergence by shape:
+    tracked custom branch -> fail safe (FF-only, no reset); untracked custom branch -> merge;
+    same untracked branch -> reset; orphan history -> rescue ref first; a post-pull syntax
+    error in a critical file rolls back. Exits on failure; returns pre-pull SHA."""
     update_succeeded = False
     # Pre-pull SHA for auto-rollback (stray conflict markers once bricked every updater).
     # Capture the pre-pull SHA so we can auto-roll-back if the new code has a syntax error in a
@@ -806,8 +823,8 @@ def _pull_updates(
     try:
         # merge --ff-only the already-fetched ref instead of `git pull`, which would do a
         # SECOND network fetch; identical in effect given the fresh tracking ref.
-        if _git_run(git_cmd, ["merge", "--ff-only", f"origin/{branch}"]).returncode != 0:
-            _reconcile_diverged_checkout(git_cmd, branch, pre_pull_sha)
+        if _git_run(git_cmd, ["merge", "--ff-only", source_ref]).returncode != 0:
+            _reconcile_diverged_checkout(git_cmd, branch, pre_pull_sha, source_ref=source_ref)
         _rollback_if_pulled_syntax_error(git_cmd, pre_pull_sha)
         update_succeeded = True
     finally:
@@ -888,7 +905,7 @@ def _apply_parked_branch_guard(
 
 def _prepare_checkout_for_update(
     git_cmd, branch, current_branch, *, is_fork, assume_yes, gateway_mode, gw_input_fn,
-    switch_branch, _windows_gateway_resume):
+    switch_branch, _windows_gateway_resume, source_ref):
     """Parked-branch guard, land on the target, stash, count new commits. Exits when the
     checkout is unsafe to move or the target is missing. ``commit_count`` is 0 when up to
     date, -1 when tips differ but the shallow count is unrecoverable."""
@@ -902,7 +919,7 @@ def _prepare_checkout_for_update(
     if (
         not in_place_update and current_branch != branch
         and _git_run(git_cmd, ["checkout", branch]).returncode != 0):
-        track_result = _git_run(git_cmd, ["checkout", "-B", branch, f"origin/{branch}"])
+        track_result = _git_run(git_cmd, ["checkout", "-B", branch, source_ref])
         if track_result.returncode != 0:
             # Restore the stash before bailing so the user isn't stranded.
             if auto_stash_ref is not None:
@@ -921,13 +938,13 @@ def _prepare_checkout_for_update(
     # On shallow checkouts `rev-list --count` can report the entire remote ancestry. The
     # zero/nonzero gate is still sound; treat the shallow NUMBER as unknown and recover it
     # via the GitHub compare API when possible.
-    result = _git_run(git_cmd, ["rev-list", f"HEAD..origin/{branch}", "--count"], check=True)
+    result = _git_run(git_cmd, ["rev-list", f"HEAD..{source_ref}", "--count"], check=True)
     commit_count = int(result.stdout.strip())
 
     apply_is_shallow = _is_shallow_checkout(git_cmd)
     if commit_count > 0 and apply_is_shallow:
         from hermes_cli.banner import _github_compare_behind
-        counted = _github_compare_behind(*_tip_shas(git_cmd, f"origin/{branch}"))
+        counted = _github_compare_behind(*_tip_shas(git_cmd, source_ref))
         # counted == 0 means local-ahead: falls through to the up-to-date path.
         commit_count = counted if counted is not None else -1
 
@@ -1138,6 +1155,104 @@ def _current_branch_name(git_cmd, *, check: bool = False) -> str:
     return _git_run(git_cmd, ["rev-parse", "--abbrev-ref", "HEAD"], check=check).stdout.strip()
 
 
+def _current_upstream_ref(git_cmd) -> str:
+    """The current branch's upstream ref (e.g. ``origin/feature``); ``''`` when the branch has no
+    configured upstream (detached HEAD, or a branch never pushed/tracked)."""
+    result = _git_run(git_cmd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+@dataclass
+class _ResolvedUpdateBranch:
+    """The branch to update and the remote ref that actually advanced it.
+
+    ``branch`` is the local branch name (never ``None`` once returned). ``source_ref`` is the
+    full remote ref to fetch/FF from — the branch's real tracking ref for an inferred tracked
+    custom branch (e.g. ``fork/feature``), else the conventional ``origin/<branch>``. This keeps
+    ``--branch``/main on their historical ``origin/<branch>`` while a checkout that intentionally
+    runs a custom branch tracking e.g. ``fork/sofia-...`` fast-forwards from ITS remote (never
+    hardcoded ``origin``, never upstream/main).
+    """
+    branch: str
+    source_ref: str
+
+
+def _infer_update_branch(git_cmd, args) -> "_ResolvedUpdateBranch | None":
+    """Resolve which branch ``hermes update`` operates on, WITHOUT silently assuming ``main``.
+
+    Contract (branch is optional end-to-end; ``main`` is a bootstrap default only, never a
+    synthesis over an existing checkout). Returns ``None`` when the branch context is not
+    unambiguous (the caller then fails safe).
+
+    * explicit ``--branch <name>`` (non-blank) -> that name, source ``origin/<name>`` (Caso B).
+    * otherwise a branch that tracks an upstream ref -> the current branch, source = its real
+      tracking ref (Caso A; Git is the source of truth, the branch name is never hardcoded).
+    * otherwise attached to ``main`` (standard / first-install) -> ``main``, source
+      ``origin/main`` (the one legitimate ``main`` default).
+    * otherwise detached HEAD with no flag -> ``None`` (Caso C): branch context unknown.
+    * otherwise attached to a NON-main branch with no tracking upstream and no flag -> ``None``
+      (STRICT Caso D): do not guess a remote or fall back to ``main``.
+    """
+    explicit = (getattr(args, "branch", None) or "").strip()
+    if explicit:
+        # When the explicit branch is the checked-out branch itself, prefer its REAL tracking
+        # ref as the source (the remote name is never assumed — forks are commonly named
+        # `fork`/`upstream`/whatever, not `origin`). Otherwise the standard `origin/<name>`.
+        if current := _current_branch_name(git_cmd).strip():
+            if current != "HEAD" and current == explicit and (up := _current_upstream_ref(git_cmd)):
+                return _ResolvedUpdateBranch(branch=explicit, source_ref=up)
+        return _ResolvedUpdateBranch(branch=explicit, source_ref=f"origin/{explicit}")
+    current = _current_branch_name(git_cmd).strip()
+    if current == "HEAD":
+        # Detached HEAD, no explicit --branch: branch context unknown -> fail safe (Caso C).
+        return None
+    if current and (up := _current_upstream_ref(git_cmd)):
+        # A checked-out branch tracking a remote ref: stay on it, FF from its real remote
+        # (Caso A; the branch name is never hardcoded and origin is never assumed).
+        return _ResolvedUpdateBranch(branch=current, source_ref=up)
+    if current == "main":
+        # Standard install on main (first-install / no upstream configured yet): main is the
+        # legitimate default. This is the ONLY place main is used without an explicit flag.
+        return _ResolvedUpdateBranch(branch="main", source_ref="origin/main")
+    # Attached to a non-main branch with no tracking upstream and no --branch: STRICT Caso D.
+    # Do not guess a remote or fall back to main — return None so the caller fails safe.
+    return None
+
+
+def _fail_safe_unresolvable_branch(
+    git_cmd, *, current_branch: str, requested_ref: str | None = None,
+    _windows_gateway_resume=None) -> None:
+    """Branch context not unambiguous: fail safe instead of assuming ``main`` (Caso C / D).
+
+    Fires when the branch cannot be resolved without guessing:
+      * **Caso C** — detached HEAD + no explicit ``--branch`` (no branch at all); or
+      * **Caso D** — attached to a non-main branch with no tracking upstream + no flag.
+    Never runs ``checkout main``. Prints the current HEAD, the branch/ref context and the
+    actions needed to make the target unambiguous, then exits 1.
+    """
+    head_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT) or "unknown"
+    detached = current_branch in ("", "HEAD")
+    print()
+    if detached:
+        print("✗ Update aborted: HEAD is detached and no branch was specified.")
+        reason = ("  Hermes will not assume a branch for a detached checkout (never a silent main).")
+    else:
+        print(f"✗ Update aborted: on branch '{current_branch}', which has no upstream, "
+              f"and no branch was specified.")
+        reason = ("  Hermes will not guess a remote or fall back to main for a "
+                  "branch it cannot verify (NO_MAIN_FALLBACK_FOR_CUSTOM).")
+    print(f"  Current HEAD: {head_sha}")
+    if requested_ref:
+        print(f"  Requested ref: {requested_ref}")
+    print(reason)
+    print("  Make the target unambiguous, then retry:")
+    print(f"    git -C {_m().PROJECT_ROOT} branch --set-upstream-to=<remote>/<branch> "
+          f"{'<branch>' if not detached else ''}   # set a tracking upstream")
+    print("    hermes update --branch <branch>      # or pass the branch explicitly")
+    _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
+    sys.exit(1)
+
+
 def _handle_update_called_process_error(
     e, args, gateway_mode: bool, had_desktop_app_before_update: bool) -> None:
     """Git/installer failure: ZIP-fallback when safe, else report and ``sys.exit(1)``."""
@@ -1333,7 +1448,20 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
     try:
         # Scoped fetch: a bare `git fetch origin` pulls thousands of branches and can stall.
-        branch = _m()._resolve_update_branch(args)
+        # Branch is OPTIONAL end-to-end: infer it from Git (explicit --branch, else the tracked
+        # current branch) instead of silently assuming main. A detached HEAD with no flag (Caso C)
+        # or an attached non-main branch with no tracking upstream (Caso D) fails safe rather than
+        # guessing. ``source_ref`` is the remote ref that actually advanced the branch — its real
+        # tracking ref for a custom branch (never hardcoded origin), so the FF only ever comes
+        # from the correct source.
+        _resolved = _infer_update_branch(git_cmd, args)
+        if _resolved is None:
+            _fail_safe_unresolvable_branch(
+                git_cmd,
+                current_branch=_current_branch_name(git_cmd),
+                requested_ref=(getattr(args, "branch", None) or "").strip() or None,
+                _windows_gateway_resume=_windows_gateway_resume)
+        branch, source_ref = _resolved.branch, _resolved.source_ref
 
         # Self-heal abandoned .git/*.lock files (crashed fetch) or the fetch fails "File exists".
         from hermes_cli.gitlock import clear_stale_git_locks, clear_stale_tmp_packs
@@ -1359,7 +1487,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _m()._warn_orphaned_update_autostashes(git_cmd, _m().PROJECT_ROOT)
 
         print("→ Fetching updates...")
-        fetch_result = _git_run(git_cmd, ["fetch", "origin", branch], network=True)
+        # Fetch the exact ref that will be fast-forwarded onto (the branch's real tracking ref
+        # for a custom branch; ``origin/<branch>`` for the standard main/explicit path).
+        # Two-arg form (remote + refname): a single ``origin/<branch>`` string would be
+        # interpreted as a repository URL by git.
+        _fetch_remote, _, _fetch_ref = source_ref.partition("/")
+        fetch_result = _git_run(git_cmd, ["fetch", _fetch_remote, _fetch_ref], network=True)
         if fetch_result.returncode != 0:
             _print_fetch_failure(fetch_result.stderr)
             sys.exit(1)
@@ -1368,7 +1501,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _plan = _prepare_checkout_for_update(
             git_cmd, branch, current_branch, is_fork=is_fork, assume_yes=assume_yes,
             gateway_mode=gateway_mode, gw_input_fn=gw_input_fn, switch_branch=opts.switch_branch,
-            _windows_gateway_resume=_windows_gateway_resume)
+            _windows_gateway_resume=_windows_gateway_resume, source_ref=source_ref)
         commit_count = _plan.commit_count
 
         if commit_count == 0:
@@ -1392,7 +1525,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         pre_pull_sha = _pull_updates(
             git_cmd, branch, _plan.auto_stash_ref, prompt_for_restore=_plan.prompt_for_restore,
             gw_input_fn=gw_input_fn, discard_local_changes=opts.discard_local_changes,
-            keep_stash=opts.keep_stash)
+            keep_stash=opts.keep_stash, source_ref=source_ref)
         _apply_pulled_update(
             git_cmd, branch, pre_pull_sha, _plan, opts, gateway_mode=gateway_mode,
             is_fork=is_fork, desktop_dir=desktop_dir,

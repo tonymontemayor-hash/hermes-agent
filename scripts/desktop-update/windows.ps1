@@ -43,7 +43,11 @@
 
 param(
     [string]$InstallRoot,
-    [string]$Branch = "main",
+    # Branch to update against. EMPTY by design: an empty value must NOT synthesize
+    # `main`. With no --branch, `hermes update` infers the branch from the checkout
+    # (attached tracked branch) or fails safe on a detached/unresolvable HEAD — never
+    # a silent main switch. The Desktop passes the real attached branch when known.
+    [string]$Branch = "",
     [int]$DesktopPid = 0,
     [string]$RelaunchExe = "",
     [switch]$NoUi,
@@ -1584,7 +1588,14 @@ try {
         Write-HandoffLog $finalMsg
         exit $finalCode
     }
-    $updateArgs = @("-m", "hermes_cli.main", "update", "--yes", "--gateway", "--force", "--branch", $Branch)
+    # --branch is emitted ONLY when a real branch is known. An empty $Branch must
+    # NOT synthesize `main`: with no flag, `hermes update` infers the branch from
+    # the checkout (attached tracked branch) or fails safe on a detached/unresolvable
+    # HEAD — never a silent main switch.
+    $updateArgs = @("-m", "hermes_cli.main", "update", "--yes", "--gateway", "--force")
+    if ($Branch) {
+        $updateArgs += @("--branch", $Branch)
+    }
     # --keep-stash: never re-apply local source edits after the update (they
     # stay parked in git stash). Probe --help first: the flag ships with newer
     # backends and an unknown flag would abort argparse with exit 2, which
