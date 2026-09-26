@@ -30,11 +30,11 @@ def _is_successful_goal_turn(result: Any, status: str, raw: Any) -> bool:
 
 def _active_goal_manager(session: dict):
     """The session's GoalManager when a goal is active, else None."""
-    from hermes_cli.goals import GoalManager
+    from hermes_cli.goals import DEFAULT_MAX_TURNS, GoalManager
     try:
-        max_turns = int((_load_cfg().get("goals") or {}).get("max_turns", 20) or 20)
+        max_turns = int((_load_cfg().get("goals") or {}).get("max_turns", DEFAULT_MAX_TURNS) or DEFAULT_MAX_TURNS)
     except Exception:
-        max_turns = 20
+        max_turns = DEFAULT_MAX_TURNS
     goal_mgr = GoalManager(
         session_id=str(session.get("session_key") or ""), default_max_turns=max_turns)
     return goal_mgr if goal_mgr.is_active() else None

@@ -30,6 +30,8 @@ class GatewayGoalsMixin:
     def _goal_max_turns_from_config(self) -> int:
         """Configured /goal turn budget. GatewayRunner.config is a GatewayConfig dataclass, so the
         top-level ``goals`` block is only reachable via hermes_cli.config.load_config()."""
+        from hermes_cli.goals import DEFAULT_MAX_TURNS
+
         try:
             goals_cfg = (
                 (self.config or {}).get("goals", {})
@@ -40,9 +42,9 @@ class GatewayGoalsMixin:
                 from hermes_cli.config import load_config
 
                 goals_cfg = (load_config() or {}).get("goals") or {}
-            return int(goals_cfg.get("max_turns", 20) or 20)
+            return int(goals_cfg.get("max_turns", DEFAULT_MAX_TURNS) or DEFAULT_MAX_TURNS)
         except Exception:
-            return 20
+            return DEFAULT_MAX_TURNS
 
     async def _warm_goals_session_db(self, label: str) -> None:
         """Warm the goals SessionDB cache off-loop (best-effort): a cold cache runs the state.db
