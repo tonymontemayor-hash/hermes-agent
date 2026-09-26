@@ -21,11 +21,31 @@ def _hook_failure(what: str, exc: BaseException) -> None:
 
 
 def _is_successful_goal_turn(result: Any, status: str, raw: Any) -> bool:
-    """Whether a turn produced a real response the goal judge can use."""
-    return bool(
-        status == "complete" and isinstance(raw, str) and raw.strip()
-        and not (isinstance(result, dict) and result.get("failed"))
-        and not (isinstance(result, dict) and result.get("completed") is False))
+    """Whether a turn produced a real response the goal judge can use.
+
+    A ``max_iterations_reached`` turn with a summary IS resumable: the turn
+    produced a real response (the summary), the goal is still active, and the
+    judge must decide whether to continue.  Only hard failures (``failed``)
+    and ``completed=False`` WITHOUT a ``max_iterations_reached`` reason are
+    non-resumable.
+
+    This is the minimal fix for the goal auto-continue bug: before this
+    change, a goal work turn that reached ``max_iterations`` was rejected by
+    this gate (``completed=False``), the judge was never run, and the goal
+    stayed active/incomplete without a continuation being scheduled.
+    """
+    if not (status == "complete" and isinstance(raw, str) and raw.strip()):
+        return False
+    if not isinstance(result, dict):
+        return True
+    if result.get("failed"):
+        return False
+    if result.get("completed") is False:
+        reason = str(result.get("turn_exit_reason") or "")
+        if reason.startswith("max_iterations_reached("):
+            return True  # resumable: let the judge decide
+        return False
+    return True
 
 
 def _active_goal_manager(session: dict):
